@@ -8,7 +8,7 @@ output: html_document
 # Load data and define column names
 ```{r}
 dane <- read.table(
-  "C:/Users/Dell/Desktop/Eksploracja Danych/Case Study/PM10.dat",
+  "PM10.dat", # UPDATE PATH TO THE FILE
   skip = 8, # Skip 8 lines at the top of the file
   header = FALSE,
   sep = "\t", # Tab-seperated values
