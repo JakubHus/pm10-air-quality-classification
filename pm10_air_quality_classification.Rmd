@@ -1,0 +1,446 @@
+---
+title: "CaseStudy"
+author: "Jakub Hus"
+date: "2026-01-17"
+output: html_document
+---
+
+# Load data and define column names
+```{r}
+dane <- read.table(
+  "C:/Users/Dell/Desktop/Eksploracja Danych/Case Study/PM10.dat",
+  skip = 8, # Skip 8 lines at the top of the file
+  header = FALSE,
+  sep = "\t", # Tab-seperated values
+  dec = "."
+)
+
+colnames(dane) <- c("log_PM10", "log_cars", "temp_2m", "wind_speed",
+                    "tempdiff_25_2m", "wind_dir", "hour", "dayno")
+```
+# Basic data inspection
+```{r}
+head(dane)
+```
+```{r}
+str(dane)
+```
+```{r}
+summary(dane)
+```
+# Outlier detection via boxplots
+# Each variable is plotted seperately to identify potential outliers that may affect model performance
+```{r}
+boxplot(dane$log_PM10,
+        main = "Boxplot log_PM10",
+        ylab = "log_PM10",
+        las = 2)
+```
+
+```{r}
+boxplot(dane$log_cars,
+        main = "Boxplot log_cars",
+        ylab = "log_cars",
+        las = 2)
+```
+```{r}
+boxplot(dane$temp_2m,
+        main = "Boxplot temp_2m",
+        ylab = "temp_2m",
+        las = 2)
+```
+```{r}
+boxplot(dane$wind_speed,
+        main = "Boxplot wind_speed",
+        ylab = "wind_speed",
+        las = 2)
+```
+```{r}
+boxplot(dane$tempdiff_25_2m,
+        main = "Boxplot tempdiff_25_2m",
+        ylab = "tempdiff_25_2m",
+        las = 2)
+```
+```{r}
+boxplot(dane$wind_dir,
+        main = "Boxplot wind_dir",
+        ylab = "wind_dir",
+        las = 2)
+```
+# Feature engineering: create target variable and time-of-day feature
+```{r}
+# PM10: binary target variable based on EU air quality stanard (50 µg/m³)
+# Since log_PM10 = ln(PM10), the threshold is log(50)
+# 'exceed' -> pollution above the norm, 'norm' -> within acceptable range
+
+dane$PM10 <- cut(
+  dane$log_PM10,
+  breaks = c(-Inf, log(50), Inf),
+  labels = c("norm", "exceed"),
+  right = FALSE
+)
+
+# day_part: categorises the hour of measurement into four time-of-day periods
+# This captures daily traffic and weather patterns relevant to PM10 levels
+
+dane$day_part <- cut(
+  dane$hour,
+  breaks = c(-Inf, 5, 11, 17, Inf),
+  labels = c("night", "morning", "afternoon", "evening"),
+  right = TRUE
+)
+
+table(dane$day_part)
+
+```
+
+```{r}
+head(dane)
+```
+# Class distribution of the target variable
+```{r}
+table(dane$PM10)
+prop.table(table(dane$PM10))
+```
+# Train, validation and test split
+# 4 observations are held out as a demonstration prediction set (pred_set)
+# The remaining data is split 75/25 into training and validation sets with stratification on PM10 to preserve class balance across splits
+```{r}
+library(caret)
+set.seed(42)
+
+id_pred <- sample(1:nrow(dane), 4)
+pred_set <- dane[id_pred, ]
+rest <- dane[-id_pred, ]
+
+id_train <- createDataPartition(rest$PM10, p = 0.75, list = FALSE)
+train_set <- rest[id_train, ]
+valid_set <- rest[-id_train, ]
+
+table(train_set$PM10)
+table(valid_set$PM10)
+```
+# Random Forest model training
+# Class weights are set to 1:3 (norm:exceed) to penalise missed exceedances more heavily than false alarms, detecting poor quality is the priority
+```{r}
+library(randomForest)
+
+set.seed(42)
+rf_model <- randomForest(
+  PM10 ~ log_cars + temp_2m + wind_speed + tempdiff_25_2m + wind_dir + day_part,
+  data = train_set,
+  ntree = 500,
+  importance = TRUE,
+  classwt = c(norm = 1, exceed = 3)
+)
+
+rf_model
+varImpPlot(rf_model)
+```
+# Validation: Random Forest predictions with custom threshold
+# Default threshold of 0.5 is lowered to 0.23 to increase Recall for 'exceed'
+```{r}
+library(ggplot2)
+
+pred_valid_rf <- predict(rf_model, newdata = valid_set, type = "prob")[, "exceed"]
+
+pred_valid_rf_thr <- ifelse(pred_valid_rf >= 0.23, "exceed", "norm")
+pred_valid_rf_thr <- factor(pred_valid_rf_thr, levels = c("norm", "exceed"))
+
+
+cm <- confusionMatrix(
+  pred_valid_rf_thr,
+  valid_set$PM10,
+  positive = "exceed"
+)
+# Visualise confusion matrix as a heatmap
+cm_df <- as.data.frame(cm$table)
+colnames(cm_df) <- c("Predykcja", "Rzeczywiste", "Liczba")
+
+
+ggplot(cm_df, aes(x = Rzeczywiste, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = Liczba), size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(
+    title = "Confusion Matrix – Random Forest",
+    x = "Real",
+    y = "Predicted"
+  ) +
+  theme_minimal()
+```
+# Model evaluation metrics - Random Forest
+```{r}
+cm$overall # Accuracy, Kappa
+```
+```{r}
+cm$byClass # Sensitivity (Recall), Specificity, Precision, F1, etc.
+```
+# Prediction on 4-observation demonstration set - Random Forest
+```{r}
+pred_prob_rf <- predict(
+  rf_model,
+  newdata = pred_set,
+  type = "prob"
+)[, "exceed"]
+
+threshold <- 0.23
+pred_class_rf <- ifelse(pred_prob_rf >= threshold, "exceed", "norm")
+pred_class_rf <- factor(pred_class_rf, levels = c("norm", "exceed"))
+
+predykcje_rf <- data.frame(
+  PM10_true = pred_set$PM10,
+  P_exceed = round(pred_prob_rf, 3),
+  PM10_pred = pred_class_rf
+)
+
+predykcje_rf
+```
+# CART decision tree model training
+# An asymmetric loss matrix penalises false negatives 3x more than false positives, consistent with the cost assumption used in Random Forest
+```{r}
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+set.seed(42)
+
+cart_model <- rpart(
+  PM10 ~ log_cars + temp_2m + wind_speed + tempdiff_25_2m + wind_dir + day_part,
+  data = train_set,
+  method = "class",
+  parms = list(
+    loss = matrix(c(0, 1,
+                    3, 0), nrow = 2)
+  )
+)
+
+cart_model
+```
+# Decision tree visualisation
+```{r}
+rpart.plot(cart_model)
+```
+# Validation: CART predictions with custom threshold
+```{r}
+pred_valid_cart_prob <- predict(cart_model, newdata = valid_set, type = "prob")[, "exceed"]
+
+pred_valid_cart_thr <- ifelse(pred_valid_cart_prob >= 0.23, "exceed", "norm")
+pred_valid_cart_thr <- factor(pred_valid_cart_thr, levels = c("norm", "exceed"))
+
+cm_cart_thr <- confusionMatrix(
+  pred_valid_cart_thr,
+  valid_set$PM10,
+  positive = "exceed"
+)
+```
+
+# Confusion matrix - CART
+```{r}
+cm_cart_df <- as.data.frame(cm_cart_thr$table)
+colnames(cm_cart_df) <- c("Predykcja", "Rzeczywiste", "Liczba")
+
+ggplot(cm_cart_df, aes(x = Rzeczywiste, y = Predykcja, fill = Liczba)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = Liczba), size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(
+    title = "Confusion Matrix – CART",
+    x = "Real",
+    y = "Prediction"
+  ) +
+  theme_minimal()
+```
+# Model evaluation metrics - CART
+```{r}
+cm_cart_thr$overall
+```
+```{r}
+cm_cart_thr$byClass
+```
+# Prediction on 4-observation demonstration set - CART
+```{r}
+pred_prob_cart <- predict(
+  cart_model,
+  newdata = pred_set,
+  type = "prob"
+)[, "exceed"]
+
+threshold <- 0.23
+pred_class_cart <- ifelse(pred_prob_cart >= threshold, "exceed", "norm")
+pred_class_cart <- factor(pred_class_cart, levels = c("norm", "exceed"))
+
+predykcje_cart <- data.frame(
+  PM10_true = pred_set$PM10,
+  P_exceed = round(pred_prob_cart, 3),
+  PM10_pred = pred_class_cart
+)
+
+predykcje_cart
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
